@@ -118,6 +118,8 @@ async function sendCAPIEvent(eventName: string, eventData: Record<string, unknow
     access_token: ACCESS_TOKEN,
   };
 
+  // Log payload before sending
+  console.log(`[CAPI HTTP] Sending ${eventName} (event_id: ${eventId}) — payload:`, JSON.parse(JSON.stringify(payload)));
   // Direct HTTP POST — no retry, no batching
   try {
     const response = await fetch(CAPI_ENDPOINT, {
@@ -126,7 +128,7 @@ async function sendCAPIEvent(eventName: string, eventData: Record<string, unknow
       body: JSON.stringify(payload),
     });
     const result = await response.json();
-    console.log(`[CAPI HTTP] ${eventName} response:`, result);
+    console.log(`[CAPI HTTP] ${eventName} (event_id: ${eventId}) — response:`, result);
   } catch (err) {
     console.error(`[CAPI HTTP] ${eventName} failed:`, err);
     // GAP: No retry, no dead letter queue
