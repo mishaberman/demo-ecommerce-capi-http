@@ -33,6 +33,14 @@ const ACCESS_TOKEN = 'EAAEDq1LHx1gBRPAEq5cUOKS5JrrvMif65SN8ysCUrX5t0SUZB3ETInM6P
 
 const CAPI_ENDPOINT = `https://graph.facebook.com/v18.0/${PIXEL_ID}/events`;
 
+/** Read test_event_code from URL param (e.g. ?test_event_code=TEST12345) */
+function getTestEventCode(): string | null {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('test_event_code');
+  } catch { return null; }
+}
+
 // ============================================================
 // HELPERS
 // ============================================================
@@ -118,8 +126,14 @@ async function sendCAPIEvent(eventName: string, eventData: Record<string, unknow
     access_token: ACCESS_TOKEN,
   };
 
+  // Include test_event_code if present in URL params
+  const testEventCode = getTestEventCode();
+  if (testEventCode) {
+    (payload as Record<string, unknown>).test_event_code = testEventCode;
+  }
+
   // Log payload before sending
-  console.log(`[CAPI HTTP] Sending ${eventName} (event_id: ${eventId}) — payload:`, JSON.parse(JSON.stringify(payload)));
+  console.log(`[CAPI HTTP] Sending ${eventName} (event_id: ${eventId})${testEventCode ? ` [TEST: ${testEventCode}]` : ''} — payload:`, JSON.parse(JSON.stringify(payload)));
   // Direct HTTP POST — no retry, no batching
   try {
     const response = await fetch(CAPI_ENDPOINT, {
