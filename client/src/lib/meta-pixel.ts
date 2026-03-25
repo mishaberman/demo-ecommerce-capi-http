@@ -1,23 +1,10 @@
 /**
- * Meta Pixel & Conversions API — Direct HTTP POST Implementation
+ * Meta Pixel & Conversions API — Hybrid Implementation
  * 
- * CAPI METHOD: Raw fetch() POST to Graph API endpoint
+ * CAPI METHOD: Server-side endpoint (/api/meta-capi)
  * 
- * PIXEL STATUS: Good — proper init with advanced matching (em, ph),
- *   noscript fallback present, all standard events tracked with decent params.
- * 
- * CAPI STATUS: Functional but improvable
- * CAPI GAPS:
- * 1. Access token exposed client-side (should be server-side)
- * 2. No retry logic on failed requests
- * 3. No batching — sends one event per request instead of batching up to 1000
- * 4. Missing fbc (click ID) and fbp (browser ID) cookies in user_data
- * 5. event_id generated but uses Math.random() — not cryptographically strong
- * 6. No data_processing_options for CCPA/GDPR
- * 7. Missing client_ip_address (can't be obtained client-side accurately)
- * 8. Hashing uses SHA-256 but doesn't normalize before hashing (no lowercase/trim)
- * 9. No error handling callback or dead letter queue
- * 10. event_time uses client clock which may be inaccurate
+ * This file now handles both the client-side Pixel events and forwards
+ * the necessary data to a secure, server-side endpoint for CAPI.
  */
 
 declare global {
@@ -27,30 +14,29 @@ declare global {
   }
 }
 
-const PIXEL_ID = '1684145446350033';
-const ACCESS_TOKEN = 'EAAEDq1LHx1gBRPAEq5cUOKS5JrrvMif65SN8ysCUrX5t0SUZB3ETInM6Pt71VHea0bowwEehinD0oZAeSmIPWivziiVu0FuEIcsmgvT3fiqZADKQDiFgKdsugONbJXELgvLuQxHT0krELKt3DPhm0EyUa44iXu8uaZBZBddgVmEnFdNMBmsWmYJdOT17DTitYKwZDZD';
-// GAP: Access token is hardcoded client-side — should be on server
-
-const CAPI_ENDPOINT = `https://graph.facebook.com/v18.0/${PIXEL_ID}/events`;
-
 // ============================================================
 // HELPERS
 // ============================================================
 
+/**
+ * Generates a cryptographically secure unique event ID.
+ */
 function generateEventId(): string {
-  // GAP: Uses Math.random() — should use crypto.randomUUID()
-  return 'evt_' + Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+  return crypto.randomUUID();
 }
 
-async function hashSHA256(value: string): Promise<string> {
-  // GAP: Does NOT normalize (lowercase, trim) before hashing
-  const encoder = new TextEncoder();
-  const data = encoder.encode(value);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+/**
+ * Retrieves a cookie by its name.
+ */
+function getCookie(name: string): string | null {
+  if (typeof document === 'undefined') return null;
+  const value = `; ${document.cookie}`;
+  const parts = value.split(`; ${name}=`);
+  if (parts.length === 2) return parts.pop()?.split(';').shift() || null;
+  return null;
 }
 
+// Store user data in memory
 let storedUserData: Record<string, string> = {};
 
 export function setUserData(data: { email?: string; phone?: string; firstName?: string; lastName?: string; city?: string; state?: string; zip?: string }) {
@@ -64,7 +50,7 @@ export function setUserData(data: { email?: string; phone?: string; firstName?: 
 }
 
 // ============================================================
-// PIXEL EVENTS — Good implementation with event_id
+// PIXEL EVENTS — Sent from the client
 // ============================================================
 
 export function trackPixelEvent(eventName: string, params?: Record<string, unknown>, eventId?: string) {
@@ -78,109 +64,94 @@ export function trackPixelEvent(eventName: string, params?: Record<string, unkno
   }
 }
 
-export function trackCustomEvent(eventName: string, params?: Record<string, unknown>) {
-  if (typeof window !== 'undefined' && window.fbq) {
-    window.fbq('trackCustom', eventName, params);
-  }
-}
-
 // ============================================================
-// CAPI — Direct HTTP POST (fetch)
+// CAPI — Sent to the server-side endpoint
 // ============================================================
 
 async function sendCAPIEvent(eventName: string, eventData: Record<string, unknown>, eventId: string) {
-  const userData: Record<string, unknown> = {
-    client_user_agent: navigator.userAgent,
-    // GAP: Missing fbc — should read _fbc cookie
-    // GAP: Missing fbp — should read _fbp cookie
-    // GAP: Missing client_ip_address — needs server-side
-  };
-
-  if (storedUserData.em) userData.em = [await hashSHA256(storedUserData.em)];
-  if (storedUserData.ph) userData.ph = [await hashSHA256(storedUserData.ph)];
-  if (storedUserData.fn) userData.fn = [await hashSHA256(storedUserData.fn)];
-  if (storedUserData.ln) userData.ln = [await hashSHA256(storedUserData.ln)];
-  if (storedUserData.ct) userData.ct = [await hashSHA256(storedUserData.ct)];
-  if (storedUserData.st) userData.st = [await hashSHA256(storedUserData.st)];
-  if (storedUserData.zp) userData.zp = [await hashSHA256(storedUserData.zp)];
+  const fbc = getCookie('_fbc');
+  const fbp = getCookie('_fbp');
 
   const payload = {
-    data: [{
-      event_name: eventName,
-      event_time: Math.floor(Date.now() / 1000),
-      event_id: eventId,
-      action_source: 'website',
-      event_source_url: window.location.href,
-      user_data: userData,
-      custom_data: eventData,
-      // GAP: Missing data_processing_options
-    }],
-    access_token: ACCESS_TOKEN,
+    eventName,
+    eventData,
+    eventId,
+    eventSourceUrl: window.location.href,
+    userData: storedUserData, // Send raw PII to server for secure hashing
+    fbc: fbc,
+    fbp: fbp,
   };
 
-  // Direct HTTP POST — no retry, no batching
   try {
-    const response = await fetch(CAPI_ENDPOINT, {
+    const response = await fetch('/api/meta-capi', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    const result = await response.json();
-    console.log(`[CAPI HTTP] ${eventName} response:`, result);
+    if (!response.ok) {
+      console.error(`[CAPI Client] Server returned an error for ${eventName}:`, await response.json());
+    }
   } catch (err) {
-    console.error(`[CAPI HTTP] ${eventName} failed:`, err);
-    // GAP: No retry, no dead letter queue
+    console.error(`[CAPI Client] Failed to send ${eventName} to server:`, err);
   }
 }
 
 // ============================================================
-// EVENT FUNCTIONS
+// UNIFIED EVENT FUNCTIONS (PIXEL + CAPI)
 // ============================================================
 
 export function trackViewContent(productId: string, productName: string, value: number, currency: string) {
   const eventId = generateEventId();
-  trackPixelEvent('ViewContent', { content_ids: [productId], content_type: 'product', content_name: productName, value, currency }, eventId);
-  sendCAPIEvent('ViewContent', { content_ids: [productId], content_type: 'product', content_name: productName, value, currency }, eventId);
+  const params = { content_ids: [productId], content_type: 'product', content_name: productName, value, currency };
+  trackPixelEvent('ViewContent', params, eventId);
+  sendCAPIEvent('ViewContent', params, eventId);
 }
 
 export function trackAddToCart(productId: string, productName: string, value: number, currency: string, quantity: number) {
   const eventId = generateEventId();
-  trackPixelEvent('AddToCart', { content_ids: [productId], content_type: 'product', content_name: productName, value, currency, num_items: quantity }, eventId);
-  sendCAPIEvent('AddToCart', { content_ids: [productId], content_type: 'product', content_name: productName, value, currency, num_items: quantity }, eventId);
+  const params = { content_ids: [productId], content_type: 'product', content_name: productName, value, currency, num_items: quantity };
+  trackPixelEvent('AddToCart', params, eventId);
+  sendCAPIEvent('AddToCart', params, eventId);
 }
 
 export function trackInitiateCheckout(value: number, currency: string, numItems: number, contentIds?: string[]) {
   const eventId = generateEventId();
-  trackPixelEvent('InitiateCheckout', { value, currency, num_items: numItems, content_type: 'product', ...(contentIds ? { content_ids: contentIds } : {}) }, eventId);
-  sendCAPIEvent('InitiateCheckout', { value, currency, num_items: numItems, content_type: 'product', ...(contentIds ? { content_ids: contentIds } : {}) }, eventId);
+  const params = { value, currency, num_items: numItems, content_type: 'product', ...(contentIds ? { content_ids: contentIds } : {}) };
+  trackPixelEvent('InitiateCheckout', params, eventId);
+  sendCAPIEvent('InitiateCheckout', params, eventId);
 }
 
 export function trackPurchase(value: number, currency: string, contentIds?: string[], numItems?: number) {
   const eventId = generateEventId();
-  trackPixelEvent('Purchase', { value, currency, content_type: 'product', ...(contentIds ? { content_ids: contentIds } : {}), ...(numItems ? { num_items: numItems } : {}) }, eventId);
-  sendCAPIEvent('Purchase', { value, currency, content_type: 'product', ...(contentIds ? { content_ids: contentIds } : {}), ...(numItems ? { num_items: numItems } : {}) }, eventId);
+  const params = { value, currency, content_type: 'product', ...(contentIds ? { content_ids: contentIds } : {}), ...(numItems ? { num_items: numItems } : {}) };
+  trackPixelEvent('Purchase', params, eventId);
+  sendCAPIEvent('Purchase', params, eventId);
 }
 
 export function trackLead(formType?: string) {
   const eventId = generateEventId();
-  trackPixelEvent('Lead', { content_name: formType || 'contact_form', value: 10.00, currency: 'USD' }, eventId);
-  sendCAPIEvent('Lead', { content_name: formType || 'contact_form', value: 10.00, currency: 'USD' }, eventId);
+  const params = { content_name: formType || 'contact_form', value: 10.00, currency: 'USD' };
+  trackPixelEvent('Lead', params, eventId);
+  sendCAPIEvent('Lead', params, eventId);
 }
 
 export function trackCompleteRegistration(method?: string) {
   const eventId = generateEventId();
-  trackPixelEvent('CompleteRegistration', { content_name: method || 'email', value: 5.00, currency: 'USD', status: true }, eventId);
-  sendCAPIEvent('CompleteRegistration', { content_name: method || 'email', value: 5.00, currency: 'USD', status: true }, eventId);
+  const params = { content_name: method || 'email', value: 5.00, currency: 'USD', status: true };
+  trackPixelEvent('CompleteRegistration', params, eventId);
+  sendCAPIEvent('CompleteRegistration', params, eventId);
 }
 
 export function trackContact() {
   const eventId = generateEventId();
-  trackPixelEvent('Contact', { value: 15.00, currency: 'USD' }, eventId);
-  sendCAPIEvent('Contact', { value: 15.00, currency: 'USD' }, eventId);
+  const params = { value: 15.00, currency: 'USD' };
+  trackPixelEvent('Contact', params, eventId);
+  sendCAPIEvent('Contact', params, eventId);
 }
 
 export function trackSearch(query: string) {
   const eventId = generateEventId();
-  trackPixelEvent('Search', { search_string: query, content_category: 'products' }, eventId);
-  sendCAPIEvent('Search', { search_string: query, content_category: 'products' }, eventId);
+  const params = { search_string: query, content_category: 'products' };
+  trackPixelEvent('Search', params, eventId);
+  sendCAPIEvent('Search', params, eventId);
 }
